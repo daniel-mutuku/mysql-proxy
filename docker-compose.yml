@@ -1,0 +1,80 @@
+services:
+  mysql:
+    image: mysql:${MYSQL_VERSION}
+    container_name: mp-mysql
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD}
+      MYSQL_DATABASE: ${DB_NAME}
+      MYSQL_USER: ${DB_USER}
+      MYSQL_PASSWORD: ${DB_PASS}
+    command: ["--max-connections=${MYSQL_MAX_CONNECTIONS}"]
+    ports:
+      - "${MYSQL_HOST_PORT}:3306"
+    volumes:
+      - ./mysql/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+      - mysql-data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD-SHELL", "mysqladmin ping -h 127.0.0.1 -uroot -p$$MYSQL_ROOT_PASSWORD"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  proxy:
+    build: ./proxy
+    container_name: mp-proxy
+    environment:
+      # Credentials clients (PHP) use to log in to the proxy.
+      PROXY_USER: ${DB_USER}
+      PROXY_PASS: ${DB_PASS}
+      # Credentials the proxy uses to log in to MySQL.
+      BACKEND_ADDR: mysql:3306
+      BACKEND_USER: ${DB_USER}
+      BACKEND_PASS: ${DB_PASS}
+    command:
+      - -addr=:3308
+      - -pool-size=${PROXY_POOL_SIZE}
+      - -pool-wait=${PROXY_POOL_WAIT}
+    ports:
+      - "${PROXY_HOST_PORT}:3308"
+    # Longer than the proxy's own -grace (10s) so it can drain clients
+    # before Docker sends SIGKILL.
+    stop_grace_period: 15s
+    depends_on:
+      mysql:
+        condition: service_healthy
+
+  php:
+    build: ./php
+    container_name: mp-php
+    environment:
+      # index.php picks one per request via ?mode=direct|proxy
+      DIRECT_DB_HOST: ${DIRECT_DB_HOST}
+      DIRECT_DB_PORT: ${DIRECT_DB_PORT}
+      PROXY_DB_HOST: ${PROXY_DB_HOST}
+      PROXY_DB_PORT: ${PROXY_DB_PORT}
+      DB_NAME: ${DB_NAME}
+      DB_USER: ${DB_USER}
+      DB_PASS: ${DB_PASS}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      - ./app:/var/www/html
+    depends_on:
+      mysql:
+        condition: service_healthy
+      proxy:
+        condition: service_started
+
+  nginx:
+    image: nginx:1.27-alpine
+    container_name: mp-nginx
+    ports:
+      - "${APP_HOST_PORT}:80"
+    volumes:
+      - ./app:/var/www/html:ro
+      - ./nginx/default.conf:/etc/nginx/conf.d/default.conf:ro
+    depends_on:
+      - php
+
+volumes:
+  mysql-data:
